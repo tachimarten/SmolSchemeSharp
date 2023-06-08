@@ -23,10 +23,9 @@ namespace SmolScheme {
 
         protected void AddImport(string import, Def def) {
             if (Imports.ContainsKey(import)) {
-                // TODO: We should switch between MJS-expression and S-expression representations
-                // as applicable.
                 throw new ImportException(String.Format(
-                    "A symbol named `{0}` has already been imported", import));
+                    "A symbol named `{0}` has already been imported",
+                    Interpreter.Current.FormatSymbol(import)));
             }
 
             Imports.Add(import, def);
@@ -41,10 +40,9 @@ namespace SmolScheme {
         public OnlyImportSet(ImportSet target, string[] subset) : base() {
             foreach (string import in subset) {
                 if (!target.Imports.ContainsKey(import)) {
-                    // TODO: We should switch between MJS-expression and S-expression
-                    // representations as applicable.
                     throw new ImportException(String.Format(
-                        "Symbol `{0}` wasn't found in the original import set", import));
+                        "Symbol `{0}` wasn't found in the original import set",
+                        Interpreter.Current.FormatSymbol(import)));
                 }
 
                 AddImport(import, target.Imports[import]);
@@ -91,8 +89,11 @@ namespace SmolScheme {
 
     public class PrefixImportSet : ImportSet {
         public PrefixImportSet(ImportSet target, string prefix) : base() {
-            foreach (KeyValuePair<string, Def> pair in target.Imports)
-                AddImport(prefix + pair.Key, pair.Value);
+            prefix = Identifier.SwitchRepr(prefix);
+            foreach (KeyValuePair<string, Def> pair in target.Imports) {
+                AddImport(Identifier.SwitchRepr(prefix + Identifier.SwitchRepr(pair.Key)),
+                    pair.Value);
+            }
         }
     }
 
@@ -100,7 +101,6 @@ namespace SmolScheme {
         internal ImportException(string message) : base(message) { }
     }
 
-    // TODO: Only support this at the beginning of a program.
     internal class ImportForm : Syntax {
         // This is factored out so that library declaration syntax can use it too.
         internal static void Import(ListExpr listExpr, Env env) {
@@ -117,7 +117,10 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
+            if ((mode & Mode.AllowImports) == 0)
+                throw new SchemeException("Imports are only allowed at the start of the program");
+
             Import(listExpr, env);
             return new Result(SchemeNull.Null);
         }
@@ -130,8 +133,8 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
-            if (!allowDefine) {
+                Mode mode) {
+            if ((mode & Mode.AllowDefine) == 0) {
                 throw new SchemeException(
                     "Define is only allowed at top-level or in bodies",
                     listExpr.Loc);
@@ -180,8 +183,8 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
-            if (!allowDefine) {
+                Mode mode) {
+            if ((mode & Mode.AllowDefine) == 0) {
                 throw new SchemeException(
                     "Define is only allowed at top-level or in bodies",
                     listExpr.Loc);
@@ -191,12 +194,11 @@ namespace SmolScheme {
             CheckArity(args, 2);
             SExpr formalsExpr = args[0], valueExpr = args[1];
 
-            // TODO: Do the formals have to be a list? Check another implementation.
             SExpr[] formals = formalsExpr.RequireListExpr().ToArray();
             string[] names = formals.Select(formal => formal.RequireIdentifier()).ToArray();
 
-            SchemeObject[] values =
-                Interpreter.Current.EvaluateMulti(valueExpr, env, dynEnv, false, names.Length);
+            SchemeObject[] values = Interpreter.Current.EvaluateMulti(
+                valueExpr, env, dynEnv, mode & ~Mode.AllowDefine, names.Length);
 
             for (int i = 0; i < names.Length; i++)
                 env.Add(names[i], values[i]);
@@ -212,7 +214,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 3, -1);
 
@@ -427,7 +429,7 @@ namespace SmolScheme {
         }
 
         public Env CreateInteractionEnvironment() {
-            var rib = new Env();
+            Env rib = CreateNullEnvironment();
             rib.Import(RequireLibrary("Scheme", "Base"));
             rib.Import(RequireLibrary("Scheme", "CaseLambda"));
             rib.Import(RequireLibrary("Scheme", "Char"));
@@ -446,6 +448,17 @@ namespace SmolScheme {
             rib.Import(RequireLibrary("Srfi", "88"));
             rib.Import(RequireLibrary("SmolScheme", "Extensions"));
             return rib;
+        }
+
+        /// <summary>
+        /// Creates the environment that source files begin with, containing enough definitions to
+        /// bootstrap.
+        /// </summary>
+        public Env CreateNullEnvironment() {
+            return new Env() {
+                {"DefineLibrary", new SyntaxDef(new DefineLibraryForm())},
+                {"Import", new SyntaxDef(new ImportForm())},
+            };
         }
 
         public Env CreateR5RSEnvironment() {
@@ -735,8 +748,8 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
-            if (!allowDefine)
+                Mode mode) {
+            if ((mode & Mode.AllowDefine) == 0)
                 throw new SchemeException("DefineSyntax isn't allowed here");
 
             SExpr[] args = GetArguments(listExpr);
@@ -744,7 +757,7 @@ namespace SmolScheme {
             string name = args[0].RequireIdentifier();
             ListExpr syntaxRulesExpr = args[1].Require<ListExpr>();
 
-            if (!env.RefersToSyntax<SyntaxRulesMacro>(syntaxRulesExpr.Head)) {
+            if (!env.RefersTo(syntaxRulesExpr.Head, SyntaxRulesMacro.SyntaxRules)) {
                 throw new SchemeException(
                     "The second argument to DefineSyntax must be SyntaxRules[...]");
             }
@@ -763,7 +776,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 1, -1);
 
@@ -781,7 +794,7 @@ namespace SmolScheme {
 
             // Evaluate the body.
             foreach (ListExpr bodyExpr in bodyExprs)
-                Interpreter.Current.EvaluateMulti(bodyExpr, bodyEnv, dynEnv, true);
+                Interpreter.Current.EvaluateMulti(bodyExpr, bodyEnv, dynEnv, Mode.AllowDefine);
 
             // Process exports.
             var exports = new Dictionary<string, Def>();

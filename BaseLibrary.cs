@@ -41,7 +41,6 @@ namespace SmolScheme {
                 { "CurrentInputPort", new ObjectDef(IOPorts.Stdin) },
                 { "CurrentOutputPort", new ObjectDef(IOPorts.Stdout) },
                 { "Define", new SyntaxDef(new DefineForm()) },
-                { "DefineLibrary", new SyntaxDef(new DefineLibraryForm()) },
                 { "DefineRecordType", new SyntaxDef(new DefineRecordTypeForm()) },
                 { "DefineSyntax", new SyntaxDef(new DefineSyntaxForm()) },
                 { "DefineValues", new SyntaxDef(new DefineValuesForm()) },
@@ -49,8 +48,6 @@ namespace SmolScheme {
                 { "Else", CondForm.Else },
                 { "Guard", new SyntaxDef(new GuardForm()) },
                 { "If", new SyntaxDef(new IfMacro()) },
-                // FIXME: This needs to be at the beginning only.
-                { "Import", new SyntaxDef(new ImportForm()) },
                 { "Include", new SyntaxDef(new IncludeForm(/*caseInsensitive=*/false)) },
                 { "IncludeCi", new SyntaxDef(new IncludeForm(/*caseInsensitive=*/true)) },
                 { "Lambda", new SyntaxDef(new LambdaForm()) },
@@ -76,6 +73,7 @@ namespace SmolScheme {
                 { "String>=?", new ObjectDef(new StringRelationalProc(RelationalOp.GEqual)) },
                 { "String>?", new ObjectDef(new StringRelationalProc(RelationalOp.Greater)) },
                 { "SyntaxError", new SyntaxDef(new SyntaxErrorForm()) },
+                { "SyntaxRules", SyntaxRulesMacro.SyntaxRules },
                 { "Unless", new SyntaxDef(new UnlessMacro()) },
                 { "Unquote", QuasiquoteForm.Unquote },
                 { "UnquoteSplicing", QuasiquoteForm.UnquoteSplicing },
@@ -300,7 +298,7 @@ namespace SmolScheme {
 
     internal class ApplyProc : NativeProc {
         public override Evaluation Call(
-                SchemeObject[] args, Env env, DynamicEnv dynEnv, bool allowDefine) {
+                SchemeObject[] args, Env env, DynamicEnv dynEnv, Mode mode) {
             CheckArity(args, 2, -1);
 
             var callArgs = new List<SchemeObject>();
@@ -313,7 +311,7 @@ namespace SmolScheme {
             }
 
             var callExpr = new ListExpr(args[0], callArgs.ToArray());
-            return new Continuation(callExpr, env, dynEnv, allowDefine);
+            return new Continuation(callExpr, env, dynEnv, mode);
         }
     }
 
@@ -324,7 +322,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 1);
             SchemeProc proc = args[0].Require<SchemeProc>();
 
@@ -356,7 +354,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 1, -1);
             return new Result(args);
         }
@@ -364,14 +362,15 @@ namespace SmolScheme {
 
     internal class CallWithValuesProc : NativeProc {
         public override Evaluation Call(
-                SchemeObject[] args, Env env, DynamicEnv dynEnv, bool allowDefine) {
+                SchemeObject[] args, Env env, DynamicEnv dynEnv, Mode mode) {
             CheckArity(args, 2);
             SchemeProc producer = args[0].Require<SchemeProc>();
             SchemeProc consumer = args[1].Require<SchemeProc>();
 
             ListExpr callExpr = new ListExpr(args[0], new SExpr[0]);
             SchemeObject[] datums = Interpreter.Current.EvaluateMulti(callExpr, env, dynEnv);
-            return new Continuation(new ListExpr(args[1], datums), env, dynEnv, false);
+            return new Continuation(
+                new ListExpr(args[1], datums), env, dynEnv, mode & ~Mode.AllowDefine);
         }
     }
 
@@ -382,7 +381,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 2);
             SchemeProc handler = args[0].Require<SchemeProc>();
             SchemeProc thunk = args[1].Require<SchemeProc>();
@@ -406,7 +405,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 1);
             throw new SchemeException(args[0]);
         }
@@ -417,7 +416,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 1);
             return new Result(dynEnv.RaiseContinuable(args[0]));
         }
@@ -439,7 +438,7 @@ namespace SmolScheme {
         }
 
         public sealed override Evaluation Call(
-                SchemeObject[] args, Env env, DynamicEnv dynEnv, bool allowDefine) {
+                SchemeObject[] args, Env env, DynamicEnv dynEnv, Mode mode) {
             CheckArity(args, 2);
             Port port = CreatePort(args[0]);
             SchemeObject thunk = Interpreter.Current.Evaluate(args[1], env, dynEnv);

@@ -10,11 +10,71 @@ using System.Reflection;
 using System.Text;
 
 namespace SmolScheme {
-    /*
-    public class SyntacticClosure : SExpr {
-        public readonly Env mEnv;
+    internal class SyntacticClosure : SExpr {
+        public SExpr Expr;
+        public readonly Env Env;
+
+        public SyntacticClosure(SExpr expr, Env env) {
+            Expr = expr;
+            Env = env;
+        }
+
+        internal override SExpr ReplaceIdentifiers(Dictionary<string, SExpr> replacements) {
+            return new SyntacticClosure(Expr.ReplaceIdentifiers(replacements), Env);
+        }
+
+        internal override void RecursivelyReplaceDatumLabel(int label, SExpr replacement) {
+            ReplaceDatumLabel(ref Expr, label, replacement);
+        }
+
+        public override string ToString(ToStringOptions options) {
+            return Expr.ToString(options);
+        }
+
+        internal override SchemeObject Quote() {
+            return Expr.Quote();
+        }
     }
-    */
+
+    public abstract class Macro : Syntax {
+        public Env SourceEnv;
+
+        public Macro(Env env) {
+            SourceEnv = env;
+        }
+
+        public abstract SExpr Call(SExpr[] args);
+
+        public sealed override Evaluation Evaluate(
+                ListExpr listExpr,
+                Env env,
+                DynamicEnv dynEnv,
+                Mode mode) {
+            // Wrap all tail expressions up in syntactic closures so that they get the right
+            // environment.
+            SExpr[] args = listExpr.Tail.Select(arg => new SyntacticClosure(arg, env)).ToArray();
+
+            // Call.
+            SExpr rawExpansion = Call(args);
+
+            // Finally, put the result itself in a syntactic closure so that it'll be evaluated in
+            // the right environment.
+            SExpr expansion = new SyntacticClosure(rawExpansion, SourceEnv);
+            return new Continuation(expansion, env, dynEnv, mode);
+        }
+
+        protected static ListExpr CreateCons(SExpr head, SExpr tail) {
+            return new ListExpr("Cons", new SExpr[] { head, tail });
+        }
+    }
+
+    public class MacroException : Exception {
+        public SourceLocation Loc;
+
+        public MacroException(string message, SourceLocation loc = null) : base(message) {
+            Loc = loc;
+        }
+    }
 
     // 4.3.1 Binding constructs for syntactic keywords
 
@@ -34,6 +94,7 @@ namespace SmolScheme {
     // 4.3.2 Pattern language
 
     internal class SyntaxRulesMacro : Macro {
+        public static readonly PlaceholderDef SyntaxRules = new PlaceholderDef();
         public static readonly PlaceholderDef Ellipsis = new PlaceholderDef();
         public static readonly PlaceholderDef Underscore = new PlaceholderDef();
 
@@ -42,7 +103,7 @@ namespace SmolScheme {
         private readonly string mEllipsis;
 
 
-        public SyntaxRulesMacro(SExpr syntaxRulesExpr, Env env) {
+        public SyntaxRulesMacro(SExpr syntaxRulesExpr, Env env) : base(env) {
             SExpr[] syntaxRulesExprs = syntaxRulesExpr.RequireListExpr(1, -1).ToArray();
             CheckArity(syntaxRulesExprs, 2, -1);
 
@@ -81,7 +142,7 @@ namespace SmolScheme {
             ListExpr listExpr = new ListExpr(SchemeNull.Null, argsArray);
             foreach (KeyValuePair<ListPattern, SExpr> pair in mPatterns) {
                 var bindings = new Dictionary<string, SExpr>();
-                if (pair.Key.Matches(listExpr, bindings))
+                if (pair.Key.Matches(listExpr, null, bindings))
                     return pair.Value.ReplaceIdentifiers(bindings);
             }
 
@@ -90,7 +151,17 @@ namespace SmolScheme {
     }
 
     internal abstract class Pattern {
-        public abstract bool Matches(SExpr expr, Dictionary<string, SExpr> bindings);
+        protected abstract bool MatchesInner(
+            SExpr expr, Env env, Dictionary<string, SExpr> bindings);
+
+        public bool Matches(SExpr expr, Env env, Dictionary<string, SExpr> bindings) {
+            if (expr is SyntacticClosure) {
+                var syntacticClosure = (SyntacticClosure)expr;
+                return Matches(syntacticClosure.Expr, syntacticClosure.Env, bindings);
+            }
+
+            return MatchesInner(expr, env, bindings);
+        }
 
         protected static Pattern Compile(
                 SExpr expr, Env env, HashSet<string> literals, string ellipsis) {
@@ -99,7 +170,7 @@ namespace SmolScheme {
                 if (env.RefersTo(ident.Name, SyntaxRulesMacro.Underscore))
                     return new WildcardPattern();
                 if (literals.Contains(ident.Name))
-                    return new LiteralIdentifierPattern(ident.Name);
+                    return new LiteralIdentifierPattern(ident.Name, env);
                 return new NonLiteralIdentifierPattern(ident.Name);
             }
 
@@ -120,7 +191,8 @@ namespace SmolScheme {
     internal class WildcardPattern : Pattern {
         internal WildcardPattern() { }
 
-        public override bool Matches(SExpr expr, Dictionary<string, SExpr> bindings) {
+        protected override bool MatchesInner(
+                SExpr expr, Env env, Dictionary<string, SExpr> bindings) {
             return true;
         }
     }
@@ -132,7 +204,8 @@ namespace SmolScheme {
             mName = name;
         }
 
-        public override bool Matches(SExpr expr, Dictionary<string, SExpr> bindings) {
+        protected override bool MatchesInner(
+                SExpr expr, Env env, Dictionary<string, SExpr> bindings) {
             bindings.Add(mName, expr);
             return true;
         }
@@ -140,14 +213,22 @@ namespace SmolScheme {
 
     internal class LiteralIdentifierPattern : Pattern {
         private string mName;
+        private Def mDef;
 
-        public LiteralIdentifierPattern(string name) {
+        public LiteralIdentifierPattern(string name, Env env) {
             mName = name;
+            mDef = env.Get(name);
         }
 
-        public override bool Matches(SExpr expr, Dictionary<string, SExpr> bindings) {
-            // TODO: Lexical scoping
-            return expr is Identifier && ((Identifier)expr).Name == mName;
+        protected override bool MatchesInner(
+                SExpr expr, Env env, Dictionary<string, SExpr> bindings) {
+            if (!(expr is Identifier))
+                return false;
+
+            Identifier identifier = (Identifier)expr;
+            if (mDef == null)
+                return mName == identifier.Name && env.Get(mName) == null;
+            return env.RefersTo(identifier, mDef);
         }
     }
 
@@ -187,7 +268,8 @@ namespace SmolScheme {
             return prefix;
         }
 
-        public override bool Matches(SExpr expr, Dictionary<string, SExpr> bindings) {
+        protected override bool MatchesInner(
+                SExpr expr, Env env, Dictionary<string, SExpr> bindings) {
             // Check that the expression is a list.
             if (!(expr is E))
                 return false;
@@ -202,7 +284,7 @@ namespace SmolScheme {
             if (length > mPrefix.Length)
                 return false;
             for (int i = 0; i < length; i++) {
-                if (!mPrefix[i].Matches(listExpr.ElementAt(i), bindings))
+                if (!mPrefix[i].Matches(listExpr.ElementAt(i), env, bindings))
                     return false;
             }
 
@@ -212,7 +294,7 @@ namespace SmolScheme {
                     return false;
                 for (int i = 0; i < mSuffix.Length; i++) {
                     int listIndex = length - mSuffix.Length + i;
-                    if (!mSuffix[i].Matches(listExpr.ElementAt(listIndex), bindings))
+                    if (!mSuffix[i].Matches(listExpr.ElementAt(listIndex), env, bindings))
                         return false;
                 }
             }
@@ -265,11 +347,10 @@ namespace SmolScheme {
                 tailPattern);
         }
 
-        public override bool Matches(SExpr expr, Dictionary<string, SExpr> bindings) {
-            if (!base.Matches(expr, bindings))
-                return false;
+        protected override bool MatchesInner(
+                SExpr expr, Env env, Dictionary<string, SExpr> bindings) {
             // If the above succeeded, we know we have a SplatExpr, so we can safely downcast.
-            return mTail.Matches(((SplatExpr)expr).Tail, bindings);
+            return mTail.Matches(((SplatExpr)expr).Tail, env, bindings);
         }
     }
 
@@ -293,7 +374,8 @@ namespace SmolScheme {
             mDatum = datum;
         }
 
-        public override bool Matches(SExpr expr, Dictionary<string, SExpr> bindings) {
+        protected override bool MatchesInner(
+                SExpr expr, Env env, Dictionary<string, SExpr> bindings) {
             return expr is SchemeObject && ((SchemeObject)expr).Equal(mDatum);
         }
     }
@@ -305,7 +387,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 1, -1);
 

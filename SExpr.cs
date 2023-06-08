@@ -59,7 +59,7 @@ namespace SmolScheme {
         }
 
         public IEnumerable<SExpr> RequireListExpr(int minCount = 0, int maxCount = -1) {
-            if (this is SchemeNull)
+            if (this is NullExpr)
                 return new SchemeList[] { };
             if (!(this is ListExpr))
                 throw new SchemeException("Expected list but found " + GetType());
@@ -492,7 +492,6 @@ namespace SmolScheme {
         }
 
         internal override SExpr ReplaceIdentifiers(Dictionary<string, SExpr> replacements) {
-            // TODO: Hygiene!
             if (replacements.ContainsKey(Name))
                 return replacements[Name];
             return this;
@@ -507,32 +506,6 @@ namespace SmolScheme {
         SReprFoldCase = 2,
     }
 
-    // Macros
-
-    public abstract class Macro : Syntax {
-        public abstract SExpr Call(SExpr[] args);
-
-        public sealed override Evaluation Evaluate(
-                ListExpr listExpr,
-                Env env,
-                DynamicEnv dynEnv,
-                bool allowDefine) {
-            return new Continuation(Call(listExpr.Tail), env, dynEnv, allowDefine);
-        }
-
-        protected static ListExpr CreateCons(SExpr head, SExpr tail) {
-            return new ListExpr("Cons", new SExpr[] { head, tail });
-        }
-    }
-
-    public class MacroException : Exception {
-        public SourceLocation Loc;
-
-        public MacroException(string message, SourceLocation loc = null) : base(message) {
-            Loc = loc;
-        }
-    }
-
     // Source locations
 
     public class SourceLocation {
@@ -545,7 +518,7 @@ namespace SmolScheme {
         }
 
         public override string ToString() {
-            return Path == null ? "" + LineNumber : Path + ":" + LineNumber;
+            return (Path == null ? "" : Path + ":") + "line " + LineNumber;
         }
     }
 

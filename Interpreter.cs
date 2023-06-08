@@ -1,6 +1,7 @@
 // SmolScheme/Interpreter.cs
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -25,19 +26,77 @@ namespace SmolScheme {
 
         public readonly Libraries Libraries;
 
+        private readonly bool mPreferMJSForm;
+
         public static Interpreter Current {
             get { return sCurrentInterpreter.Value; }
         }
 
-        public Interpreter(Libraries libraries) {
+        /// <summary>
+        /// If `preferMJSForm` is true, then symbols in error messages are printed in MJS form;
+        /// otherwise, they're printed in S form. This has no effect on anything other than error
+        /// messages.
+        /// </summary>
+        public Interpreter(Libraries libraries, bool preferMJSForm = false) {
             Libraries = libraries;
+            mPreferMJSForm = preferMJSForm;
+        }
+
+        /// <summary>
+        /// Loads and runs a Scheme program.
+        /// </summary>
+        public void Load(
+                Stream stream,
+                Env env,
+                DynamicEnv dynEnv,
+                string path = null,
+                bool useMJSReader = false) {
+            using (var streamReader = new StreamReader(new BufferedStream(stream))) {
+                Reader reader = new InitialFileLexer(streamReader).CreateReader();
+
+                Mode mode = Mode.AllowDefine | Mode.AllowImports;
+                try {
+                    while (true) {
+                        reader.AdvanceToNextTopLevelStatement();
+                        SExpr expr = reader.ParseSExpr();
+                        if (expr == null) {
+                            reader.ExpectEof("expression or end of file");
+                            break;
+                        }
+
+                        // According to R⁷RS § 5.1, imports are only allowed at the start of the
+                        // file.
+                        //
+                        // NB: In § 5.6.2, R⁷RS gives an example of a program that uses imports
+                        // after `DefineLibrary`, in apparent contradiction to the earlier spec
+                        // language. Because allowing imports after `DefineLibrary` is useful, I've
+                        // chosen to allow it.
+                        if (!(expr is ListExpr)) {
+                            SExpr head = ((ListExpr)expr).Head;
+                            if (!env.RefersToSyntax<ImportForm>(head) &&
+                                    !env.RefersToSyntax<DefineLibraryForm>(head)) {
+                                mode &= ~Mode.AllowImports;
+                            }
+                        }
+
+                        Evaluate(expr, env, dynEnv, mode);
+                    }
+                } finally {
+                    reader.Dispose();
+                }
+            }
+        }
+
+        public void Load(Env env, DynamicEnv dynEnv, string path, bool useMJSReader = false) {
+            Load(File.Open(path, FileMode.Open), env, dynEnv, path, useMJSReader);
         }
 
         /// <summary>
         /// Evaluates an expression returning a single value.
         /// </summary>
-        public SchemeObject Evaluate(SExpr expr, Env env, DynamicEnv dynEnv, bool allowDefine = false) {
-            return EvaluateMulti(expr, env, dynEnv, allowDefine, 1)[0];
+        public SchemeObject Evaluate(
+                SExpr expr, Env env, DynamicEnv dynEnv, Mode mode = Mode.Default) {
+            return EvaluateMulti(expr, env, dynEnv, mode, 1)[0];
         }
 
         /// <summary>
@@ -47,20 +106,24 @@ namespace SmolScheme {
                 SExpr expr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine = false,
+                Mode mode = Mode.Default,
                 int expectedValueCount = -1) {
             Interpreter oldInterpreter = sCurrentInterpreter.Value;
             sCurrentInterpreter.Value = this;
 
+            // Is this the outermost evaluation of a procedure call?
+            bool isProc = false;
+
             try {
                 while (true) {
-                    Evaluation evaluation = EvaluateOnce(expr, env, dynEnv, allowDefine);
+                    Evaluation evaluation = EvaluateOnce(expr, env, dynEnv, mode);
                     if (evaluation is Continuation) {
                         var continuation = (Continuation)evaluation;
                         expr = continuation.Expr;
                         env = continuation.Env;
                         dynEnv = continuation.DynEnv;
-                        allowDefine = continuation.AllowDefine;
+                        mode = continuation.Mode;
+                        isProc = continuation.IsProc;
                         continue;
                     }
 
@@ -75,14 +138,16 @@ namespace SmolScheme {
                     return result.Datums;
                 }
             } catch (SchemeException exception) {
-                exception.AddSchemeFrame(expr.Loc);
+                exception.AttachLocation(expr.Loc);
+                if (isProc)
+                    exception.PushStackFrame(null);
                 throw;
             } finally {
                 sCurrentInterpreter.Value = oldInterpreter;
             }
         }
 
-        private Evaluation EvaluateOnce(SExpr expr, Env env, DynamicEnv dynEnv, bool allowDefine) {
+        private Evaluation EvaluateOnce(SExpr expr, Env env, DynamicEnv dynEnv, Mode mode) {
             // Values are self-evaluating.
             if (expr is SchemeObject)
                 return new Result((SchemeObject)expr);
@@ -102,7 +167,7 @@ namespace SmolScheme {
 
             // Evaluate lists.
             if (expr is ListExpr)
-                return EvaluateList((ListExpr)expr, env, dynEnv, allowDefine);
+                return EvaluateList((ListExpr)expr, env, dynEnv, mode);
 
             // Evaluate vector and bytevector expressions.
             if (expr is BaseVectorExpr) {
@@ -117,17 +182,23 @@ namespace SmolScheme {
                 throw new Exception("Unhandled vector expression type");
             }
 
+            // Evaluate syntactic closures.
+            if (expr is SyntacticClosure) {
+                var closure = (SyntacticClosure)expr;
+                return new Continuation(closure.Expr, closure.Env, dynEnv, mode);
+            }
+
             throw new SchemeException("Can't evaluate an S-expression of type: " + expr.GetType());
         }
 
         private Evaluation EvaluateList(
-                ListExpr listExpr, Env env, DynamicEnv dynEnv, bool allowDefine) {
+                ListExpr listExpr, Env env, DynamicEnv dynEnv, Mode mode) {
             // Handle syntax.
             if (listExpr.Head is Identifier) {
                 Def def = env.Get(listExpr.Head.RequireIdentifier());
                 if (def != null && def is SyntaxDef) {
                     var syntax = ((SyntaxDef)def).Value;
-                    return syntax.Evaluate(listExpr, env, dynEnv, allowDefine);
+                    return syntax.Evaluate(listExpr, env, dynEnv, mode);
                 }
             }
 
@@ -193,12 +264,13 @@ namespace SmolScheme {
                     throw new SchemeException("Internal error: Unknown clause argument type");
                 }
 
-                return new Continuation(body, rib, dynEnv, allowDefine);
+                return new Continuation(
+                    body, rib, dynEnv, mode | Mode.AllowDefine, /*isProc=*/true);
             }
 
             // Handle foreign function calls.
             if (head is NativeProc)
-                return ((NativeProc)head).Call(args, env, dynEnv, allowDefine);
+                return ((NativeProc)head).Call(args, env, dynEnv, mode);
 
             throw new SchemeException("Can't call a value of type " + head.GetType());
         }
@@ -209,30 +281,8 @@ namespace SmolScheme {
             return new SchemeList(values[0], values.Skip(1));
         }
 
-        public void Load(
-                Stream stream,
-                Env env,
-                DynamicEnv dynEnv,
-                string path = null,
-                bool useMJSReader = false) {
-            using (var streamReader = new StreamReader(new BufferedStream(stream))) {
-                Reader reader;
-                if (useMJSReader)
-                    reader = new MJSReader(streamReader, path);
-                else
-                    reader = new SReader(streamReader, path);
-
-                try {
-                    SExpr expr = reader.ParseSExpr();
-                    Evaluate(expr, env, dynEnv, true);
-                } finally {
-                    reader.Dispose();
-                }
-            }
-        }
-
-        public void Load(Env env, DynamicEnv dynEnv, string path, bool useMJSReader = false) {
-            Load(File.Open(path, FileMode.Open), env, dynEnv, path, useMJSReader);
+        internal string FormatSymbol(string mjsRepr) {
+            return mPreferMJSForm ? mjsRepr : Identifier.SwitchRepr(mjsRepr);
         }
     }
 
@@ -262,7 +312,8 @@ namespace SmolScheme {
                 handlerProc = ExceptionHandler.Proc;
 
             ListExpr callExpr = new ListExpr(handlerProc, new SExpr[] { error });
-            return Interpreter.Current.EvaluateMulti(callExpr, new Env(), handlerEnv, false, -1);
+            return Interpreter.Current.EvaluateMulti(
+                callExpr, new Env(), handlerEnv, Mode.Default, -1);
         }
 
         public SchemeObject this[Parameter param] {
@@ -271,6 +322,7 @@ namespace SmolScheme {
                 while (dynEnv != null) {
                     if (dynEnv.mParameters.ContainsKey(param))
                         return dynEnv.mParameters[param];
+                    dynEnv = dynEnv.mParent;
                 }
                 return null;
             }
@@ -297,7 +349,7 @@ namespace SmolScheme {
 
     // Name resolution
 
-    public class Env {
+    public class Env : IEnumerable<KeyValuePair<string, Def>> {
         private Dictionary<string, Def> mDefs;
         private Env mParent;
         private bool mAllowRedefinition;
@@ -325,26 +377,43 @@ namespace SmolScheme {
             return null;
         }
 
-        internal void Add(string name, Def value) {
+        public void Add(string name, Def value) {
             if (!mAllowRedefinition && mDefs.ContainsKey(name))
                 throw new SchemeException(String.Format("Symbol `{0}` is already defined", name));
-            mDefs[name] = value;
+            AddOrSet(name, value);
         }
 
-        internal void Add(string name, SchemeObject value) {
+        public void Add(string name, SchemeObject value) {
             Add(name, new ObjectDef(value));
         }
 
-        internal void Add(string name, Macro macro) {
-            Add(name, new SyntaxDef(macro));
+        public void Add(string name, Syntax syntax) {
+            Add(name, new SyntaxDef(syntax));
+        }
+
+        /// <summary>
+        /// Adds a definition to the environment, replacing one that's already there if it exists.
+        /// </summary>
+        public void AddOrSet(string name, SchemeObject value) {
+            AddOrSet(name, new ObjectDef(value));
+        }
+
+        /// <summary>
+        /// Adds a definition to the environment, replacing one that's already there if it exists.
+        /// </summary>
+        public void AddOrSet(string name, Def value) {
+            mDefs[name] = value;
         }
 
         internal void Declare(string name) {
             Add(name, new PlaceholderDef());
         }
 
-        internal bool RefersTo(string name, Def def) {
-            return Get(name) == def;
+        internal bool RefersTo(string name, Def query) {
+            Def def = Get(name);
+            if (def == null)
+                return query == null;
+            return def.RefersTo(query);
         }
 
         internal bool RefersTo(SExpr expr, Def def) {
@@ -375,20 +444,39 @@ namespace SmolScheme {
                 return String.Join(", ", Symbols.ToArray());
             return String.Join(" ", Symbols.ToArray());
         }
+
+        IEnumerator IEnumerable.GetEnumerator() {
+            return ((IEnumerable<SchemeObject>)this).GetEnumerator();
+        }
+
+        IEnumerator<KeyValuePair<string, Def>>
+                IEnumerable<KeyValuePair<string, Def>>.GetEnumerator() {
+            return mDefs.GetEnumerator();
+        }
     }
 
     // Definitions for name lookup purposes
 
-    public abstract class Def { }
+    public abstract class Def {
+        public abstract bool RefersTo(Def other);
+    }
 
     // A value that hasn't been assigned yet. Evaluating it is an error.
-    internal class PlaceholderDef : Def { }
+    public class PlaceholderDef : Def {
+        public override bool RefersTo(Def other) {
+            return this == other;
+        }
+    }
 
     public class ObjectDef : Def {
         public SchemeObject Value;
 
         public ObjectDef(SchemeObject value) {
             Value = value;
+        }
+
+        public override bool RefersTo(Def other) {
+            return other is ObjectDef && ((ObjectDef)other).Value == Value;
         }
     }
 
@@ -397,6 +485,10 @@ namespace SmolScheme {
 
         public SyntaxDef(Syntax value) {
             Value = value;
+        }
+
+        public override bool RefersTo(Def other) {
+            return other is SyntaxDef && ((SyntaxDef)other).Value == Value;
         }
     }
 
@@ -420,13 +512,21 @@ namespace SmolScheme {
         public readonly SExpr Expr;
         public readonly Env Env;
         public readonly DynamicEnv DynEnv;
-        public readonly bool AllowDefine;
+        public readonly Mode Mode;
 
-        public Continuation(SExpr expr, Env env, DynamicEnv dynEnv, bool allowDefine) {
+        /// <summary>
+        /// If this is set, then this is the outermost stack frame of a new procedure. This is used
+        /// for stack traces.
+        /// </summary>
+        public readonly bool IsProc;
+
+        public Continuation(
+                SExpr expr, Env env, DynamicEnv dynEnv, Mode mode, bool isProc = false) {
             Expr = expr;
             Env = env;
             DynEnv = dynEnv;
-            AllowDefine = allowDefine;
+            Mode = mode;
+            IsProc = isProc;
         }
     }
 
@@ -458,7 +558,7 @@ namespace SmolScheme {
     // This is almost the same as a Macro, but it can manipulate its environment.
     public abstract class Syntax {
         public abstract Evaluation Evaluate(
-            ListExpr listExpr, Env env, DynamicEnv dynEnv, bool allowDefine);
+            ListExpr listExpr, Env env, DynamicEnv dynEnv, Mode mode);
 
         internal static SExpr[] GetArguments(ListExpr expr) {
             return expr.Tail;
@@ -477,18 +577,18 @@ namespace SmolScheme {
                 IEnumerable<SExpr> exprs,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             if (!exprs.Any())
                 return new Result(SchemeNull.Null);
 
             int index = 0, lastIndex = exprs.Count() - 1;
             foreach (SExpr expr in exprs) {
                 if (index < lastIndex) {
-                    Interpreter.Current.Evaluate(expr, env, dynEnv, allowDefine);
+                    Interpreter.Current.Evaluate(expr, env, dynEnv, mode);
                     index++;
                     continue;
                 }
-                return new Continuation(expr, env, dynEnv, allowDefine);
+                return new Continuation(expr, env, dynEnv, mode);
             }
 
             throw new SchemeException("Unreachable");
@@ -502,7 +602,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 1);
             return new Result(args[0].Quote());
@@ -543,9 +643,23 @@ namespace SmolScheme {
             return "" + builder;
         }
 
-        public void AddSchemeFrame(SourceLocation loc) {
+        public void AttachLocation(SourceLocation loc) {
             if (Error != null & Error is Error)
-                ((Error)Error).AddSchemeFrame(loc);
+                ((Error)Error).AttachLocation(loc);
         }
+
+        public void PushStackFrame(string name) {
+            if (Error != null & Error is Error)
+                ((Error)Error).PushStackFrame(name);
+        }
+    }
+
+    [Flags]
+    public enum Mode : byte {
+        AllowDefine = 1,
+        AllowImports = 2,
+
+        Default = 0,
+        Repl = AllowDefine | AllowImports,
     }
 }

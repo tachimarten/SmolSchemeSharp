@@ -19,7 +19,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] formArgs = GetArguments(listExpr);
             CaseLambdaClause clause = CaseLambdaForm.BuildClause(formArgs);
             return new Result(new SchemeProcDatum(clause, env));
@@ -29,6 +29,11 @@ namespace SmolScheme {
     // 4.1.5 Conditionals
 
     internal class IfMacro : Macro {
+        public IfMacro() : base(new Env() {
+            { "Cond", new CondForm() },
+            { "Else", CondForm.Else }
+        }) { }
+
         public override SExpr Call(SExpr[] args) {
             CheckArity(args, 2, 3);
             return new ListExpr("Cond", new SExpr[] {
@@ -47,7 +52,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 2);
 
@@ -88,10 +93,10 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] results = Include(listExpr, mCaseInsensitive);
             ListExpr result = new ListExpr("Begin", results, listExpr.Loc);
-            return new Result(Interpreter.Current.Evaluate(result, env, dynEnv, allowDefine));
+            return new Result(Interpreter.Current.Evaluate(result, env, dynEnv, mode));
         }
     }
 
@@ -131,10 +136,10 @@ namespace SmolScheme {
                     SchemeProc proc = Interpreter.Current.Evaluate(
                         listClause[2], env, dynEnv).Require<SchemeProc>();
                     ListExpr call = new ListExpr(proc, new SchemeObject[] { condResult });
-                    return new Continuation(call, env, dynEnv, false);
+                    return new Continuation(call, env, dynEnv, Mode.Default);
                 }
 
-                return EvaluateMultiple(listClause.Tail, env, dynEnv, false);
+                return EvaluateMultiple(listClause.Tail, env, dynEnv, Mode.Default);
             }
 
             return null;
@@ -144,7 +149,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             Evaluation evaluation = EvaluateCond(args, env, dynEnv);
             return evaluation == null ? new Result(SchemeNull.Null) : evaluation;
@@ -156,7 +161,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 2, -1);
 
@@ -192,10 +197,14 @@ namespace SmolScheme {
                         throw new SchemeException("`=>` must be followed by exactly one argument");
                     SchemeProc proc = clausePieces.ElementAt(2).Require<SchemeProc>();
                     return new Continuation(
-                        new ListExpr(proc, new SExpr[] { key }), new Env(), dynEnv, false);
+                        new ListExpr(proc, new SExpr[] { key }),
+                        new Env(),
+                        dynEnv,
+                        mode & ~Mode.AllowDefine);
                 }
 
-                return EvaluateMultiple(clausePieces.Skip(1), env, dynEnv, false);
+                return EvaluateMultiple(
+                    clausePieces.Skip(1), env, dynEnv, mode & ~Mode.AllowDefine);
             }
 
             return new Result(SchemeNull.Null);
@@ -207,7 +216,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             foreach (SExpr arg in listExpr.Tail) {
                 if (!NativeProc.RequireBool(Interpreter.Current.Evaluate(arg, env, dynEnv)))
                     return new Result(SchemeBool.False);
@@ -221,7 +230,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             foreach (SExpr arg in listExpr.Tail) {
                 if (NativeProc.RequireBool(Interpreter.Current.Evaluate(arg, env, dynEnv)))
                     return new Result(SchemeBool.True);
@@ -231,6 +240,8 @@ namespace SmolScheme {
     }
 
     internal class WhenMacro : Macro {
+        public WhenMacro() : base(new Env() { { "Cond", new CondForm() } }) { }
+
         public override SExpr Call(SExpr[] args) {
             CheckArity(args, 2, -1);
             return new ListExpr("Cond", new SExpr[] {
@@ -240,6 +251,11 @@ namespace SmolScheme {
     }
 
     internal class UnlessMacro : Macro {
+        public UnlessMacro() : base(new Env() {
+            { "Cond", new CondForm() },
+            { "Else", CondForm.Else }
+        }) { }
+
         public override SExpr Call(SExpr[] args) {
             CheckArity(args, 2, -1);
             return new ListExpr("Cond", new SExpr[] {
@@ -269,7 +285,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 2, -1);
             SExpr[] bindingsExpr = args[0].RequireListExpr().ToArray();
@@ -289,7 +305,7 @@ namespace SmolScheme {
 
             PopulateEnvironment(env, subenv, dynEnv, bindings);
 
-            return EvaluateMultiple(args.Skip(1), subenv, dynEnv, true);
+            return EvaluateMultiple(args.Skip(1), subenv, dynEnv, mode | Mode.AllowDefine);
         }
     }
 
@@ -338,7 +354,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 2, -1);
             SExpr[] bindingsExpr = args[0].RequireListExpr().ToArray();
@@ -346,7 +362,6 @@ namespace SmolScheme {
             var bindings = new KeyValuePair<string[], SExpr>[bindingsExpr.Length];
             for (int i = 0; i < bindingsExpr.Length; i++) {
                 SExpr[] bindingPieces = bindingsExpr[i].RequireListExpr(2).ToArray();
-                // TODO: Do the formals have to be a list? Check another implementation.
                 SExpr[] formals = bindingPieces[0].RequireListExpr().ToArray();
                 string[] symbolNames =
                     formals.Select(formal => formal.RequireIdentifier()).ToArray();
@@ -359,7 +374,7 @@ namespace SmolScheme {
             for (int i = 0; i < bindingsExpr.Length; i++) {
                 KeyValuePair<string[], SExpr> binding = bindings[i];
                 SchemeObject[] symbolValues = Interpreter.Current.EvaluateMulti(
-                    binding.Value, subenv, dynEnv, false, binding.Key.Length);
+                    binding.Value, subenv, dynEnv, mode & ~Mode.AllowDefine, binding.Key.Length);
                 stagingValues[i] = symbolValues;
 
                 if (mIsStar) {
@@ -379,7 +394,7 @@ namespace SmolScheme {
                 }
             }
 
-            return EvaluateMultiple(args.Skip(1), subenv, dynEnv, true);
+            return EvaluateMultiple(args.Skip(1), subenv, dynEnv, mode | Mode.AllowDefine);
         }
     }
 
@@ -390,13 +405,13 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SourceLocation loc;
             IEnumerable<SExpr> expansion = EvaluateForm(listExpr, env, out loc);
 
             if (expansion != null) {
                 SExpr beginExpr = new ListExpr("Begin", expansion.ToArray(), loc);
-                return new Continuation(beginExpr, env, dynEnv, allowDefine);
+                return new Continuation(beginExpr, env, dynEnv, mode);
             }
 
             return new Result(SchemeNull.Null);
@@ -479,8 +494,8 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
-            return EvaluateMultiple(listExpr.Tail, env, dynEnv, allowDefine);
+                Mode mode) {
+            return EvaluateMultiple(listExpr.Tail, env, dynEnv, mode);
         }
     }
 
@@ -491,7 +506,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 2, -1);
 
@@ -505,7 +520,7 @@ namespace SmolScheme {
             Env subenv = new Env(env);
             foreach (Initializer initializer in initializers) {
                 SchemeObject value = Interpreter.Current.Evaluate(
-                    initializer.Init, env, dynEnv, false);
+                    initializer.Init, env, dynEnv, mode & ~Mode.AllowDefine);
                 subenv.Add(initializer.Name, value);
             }
 
@@ -513,19 +528,32 @@ namespace SmolScheme {
             while (!Interpreter.Current.Evaluate(test, subenv, dynEnv).IsTruthy) {
                 foreach (SExpr command in args.Skip(2))
                     Interpreter.Current.Evaluate(command, subenv, dynEnv);
-                foreach (Initializer initializer in initializers) {
-                    if (initializer.Step != null) {
-                        SchemeObject initialValue = Interpreter.Current.Evaluate(
-                            initializer.Step, subenv, dynEnv);
-                        subenv.Add(initializer.Name, initialValue);
+
+                // Evaluate all step functions before updating bindings. This is required by R⁷RS.
+
+                SchemeObject[] newValues = new SchemeObject[initializers.Length];
+                for (int i = 0; i < initializers.Length; i++) {
+                    if (initializers[i].Step != null) {
+                        newValues[i] = Interpreter.Current.Evaluate(
+                            initializers[i].Step, subenv, dynEnv);
                     }
+                }
+
+                for (int i = 0; i < newValues.Length; i++) {
+                    if (newValues[i] != null)
+                        subenv.AddOrSet(initializers[i].Name, newValues[i]);
                 }
             }
 
             // Finish up.
+
+            if (finalExprs.Length == 0)
+                return new Result(SchemeNull.Null);
+
             for (int i = 0; i < finalExprs.Length - 1; i++)
                 Interpreter.Current.Evaluate(finalExprs[i], subenv, dynEnv);
-            return new Continuation(finalExprs[finalExprs.Length - 1], subenv, dynEnv, false);
+            return new Continuation(
+                finalExprs[finalExprs.Length - 1], subenv, dynEnv, mode & ~Mode.AllowDefine);
         }
 
         private class Initializer {
@@ -556,7 +584,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             return new Result(dynEnv[this]);
         }
 
@@ -581,7 +609,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 2, -1);
 
@@ -600,7 +628,7 @@ namespace SmolScheme {
                 dynSubenv[parameter] = value;
             }
 
-            return EvaluateMultiple(args.Skip(2), env, dynSubenv, true);
+            return EvaluateMultiple(args.Skip(2), env, dynSubenv, mode | Mode.AllowDefine);
         }
     }
 
@@ -611,7 +639,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 2);
 
@@ -623,12 +651,17 @@ namespace SmolScheme {
             try {
                 Env subenv = new Env(env);
                 SchemeObject result = SchemeNull.Null;
-                foreach (SExpr expr in args.Skip(1))
-                    result = Interpreter.Current.Evaluate(expr, subenv, dynSubenv, true);
+                foreach (SExpr expr in args.Skip(1)) {
+                    result = Interpreter.Current.Evaluate(
+                        expr, subenv, dynSubenv, mode | Mode.AllowDefine);
+                }
                 return new Result(result);
             } catch (SchemeException exception) {
                 return guardHandler.Call(
-                    new SchemeObject[1] { exception.Error }, env, dynEnv, false);
+                    new SchemeObject[1] { exception.Error },
+                    env,
+                    dynEnv,
+                    mode & ~Mode.AllowDefine);
             }
         }
 
@@ -650,7 +683,7 @@ namespace SmolScheme {
                     SchemeObject[] args,
                     Env env,
                     DynamicEnv dynEnv,
-                    bool allowDefine) {
+                    Mode mode) {
                 SchemeObject exception = args[0];
 
                 Env subenv = new Env(env);
@@ -676,7 +709,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 1);
 

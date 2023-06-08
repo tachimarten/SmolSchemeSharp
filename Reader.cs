@@ -29,6 +29,13 @@ namespace SmolScheme {
             mLexer.Dispose();
         }
 
+        /// <summary>
+        /// When at top-level (either at a REPL or when evaluating a file), call this function
+        /// before calling `ParseSExpr()`. In MJS mode, this consumes `;`s, which are allowed at
+        /// top-level only. (Within lists, they instead separate list elements.)
+        /// </summary>
+        public abstract void AdvanceToNextTopLevelStatement();
+
         public abstract SExpr ParseSExpr();
 
         protected Token NextToken() {
@@ -97,17 +104,27 @@ namespace SmolScheme {
                 DidntFind(production);
             return value;
         }
+
+        public void ExpectEof(string whatWasExpected) {
+            if (!(PeekToken() is EofToken))
+                DidntFind(whatWasExpected);
+        }
     }
 
     /// <summary>
     /// Reader for S-expressions.
     /// </summary>
     internal class SReader : Reader, IDisposable {
+        public SReader(SourceStream stream, bool foldCase = false) :
+            base(new SLexer(stream, foldCase)) { }
+
         public SReader(TextReader textReader, string path = null) :
             base(new SLexer(textReader, path)) { }
 
         public SReader(string path) :
             this(new StreamReader(new FileStream(path, FileMode.Open)), path) { }
+
+        public override void AdvanceToNextTopLevelStatement() { }
 
         public override SExpr ParseSExpr() {
             Token token = GetPunctuation("(");
@@ -143,6 +160,8 @@ namespace SmolScheme {
                 return ParseVectorExpr(token, true);
             }
 
+            // Identifiers.
+            token = PeekToken();
             if (token is IdentifierToken) {
                 IdentifierToken identifierToken = (IdentifierToken)NextToken();
                 IdentifierRepr repr;
@@ -172,7 +191,8 @@ namespace SmolScheme {
                         // Comment syntax.
                         return ParseSExpr();
                     case "'":
-                        return expr.Quote();
+                        desugaring = "Quote";
+                        break;
                     case "`":
                         desugaring = "Quasiquote";
                         break;
@@ -242,31 +262,20 @@ namespace SmolScheme {
     /// Reader for MJS-expressions, SmolScheme#'s variant syntax.
     /// </summary>
     internal class MJSReader : Reader, IDisposable {
+        public MJSReader(SourceStream stream) : base(new MJSLexer(stream)) { }
+
         public MJSReader(TextReader textReader, string path = null) :
             base(new MJSLexer(textReader, path)) { }
 
         public MJSReader(string path) :
             this(new StreamReader(new FileStream(path, FileMode.Open)), path) { }
 
-        public override SExpr ParseSExpr() {
-            return ParseSequenceExpr();
+        public override void AdvanceToNextTopLevelStatement() {
+            while (ConsumePunctuation(";")) {}
         }
 
-        private SExpr ParseSequenceExpr() {
-            var sequence = new List<SExpr>();
-            do {
-                SExpr expr = ParseLambdaExpr();
-                // Allow a trailing `;`.
-                // TODO: Allow just `;` alone?
-                if (expr == null)
-                    break;
-
-                sequence.Add(expr);
-            } while (ConsumePunctuation(";"));
-
-            if (sequence.Count == 1)
-                return sequence[0];
-            return new ListExpr("Begin", sequence.ToArray(), sequence[0].Loc);
+        public override SExpr ParseSExpr() {
+            return ParseLambdaExpr();
         }
 
         private SExpr ParseLambdaExpr() {
@@ -463,15 +472,15 @@ namespace SmolScheme {
 
             bool first = true;
             while (true) {
-                bool foundComma = ConsumePunctuation(",");
+                bool foundSeparator = ConsumePunctuation(",") || ConsumePunctuation(";");
 
-                if (first && foundComma)
+                if (first && foundSeparator)
                     DidntFind(String.Format("list element, `{0}`, `'`, or `...`", closingDelim));
 
                 // Handle splat.
                 if (ConsumePunctuation("...")) {
-                    if (!first && !foundComma)
-                        DidntFind("`,`");
+                    if (!first && !foundSeparator)
+                        DidntFind("`,` or `;`");
 
                     SExpr tail = Expect(ParseSExpr(), "tail of list");
                     ExpectPunctuation(closingDelim);
@@ -485,8 +494,8 @@ namespace SmolScheme {
                     return elements;
                 }
 
-                if (!first && !foundComma)
-                    DidntFind("`,`");
+                if (!first && !foundSeparator)
+                    DidntFind("`,` or `;`");
 
                 first = false;
 

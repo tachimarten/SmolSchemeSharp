@@ -167,7 +167,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 1);
 
@@ -180,7 +180,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
             CheckArity(args, 1);
 
@@ -193,7 +193,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 1);
             SchemeObject obj = args[0];
 
@@ -285,7 +285,7 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] clauseExprs = GetArguments(listExpr);
             CaseLambdaClause[] clauses = new CaseLambdaClause[clauseExprs.Length];
             for (int i = 0; i < clauseExprs.Length; i++)
@@ -553,7 +553,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             Env newEnv = new Env();
             foreach (SchemeObject arg in args)
                 newEnv.Import(Interpreter.Current.Libraries.CreateImportSet(arg.Unquote()));
@@ -566,7 +566,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             Env interactionEnv = Interpreter.Current.Libraries.CreateInteractionEnvironment();
             return new Result(new EnvObject(interactionEnv));
         }
@@ -577,7 +577,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 1);
             if (args[0].RequireExactInt() != 5) {
                 throw new SchemeException(
@@ -594,7 +594,7 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 1);
             if (args[0].RequireExactInt() != 5)
                 throw new SchemeException("Only revision 5 is supported by NullEnvironment[]");
@@ -609,12 +609,12 @@ namespace SmolScheme {
                 SchemeObject[] args,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             CheckArity(args, 2);
             SExpr exprOrDef = args[0].Unquote();
             Env subenv = args[1].Require<EnvObject>().Env;
 
-            return new Continuation(exprOrDef, subenv, dynEnv, true);
+            return new Continuation(exprOrDef, subenv, dynEnv, mode | Mode.AllowDefine);
         }
     }
 
@@ -793,10 +793,12 @@ namespace SmolScheme {
                 ListExpr listExpr,
                 Env env,
                 DynamicEnv dynEnv,
-                bool allowDefine) {
+                Mode mode) {
             SExpr[] args = GetArguments(listExpr);
-            CheckArity(args, 1);
-            return new Continuation(args[0], new Env(env), dynEnv, true);
+            CheckArity(args, 1, -1);
+
+            Env subenv = new Env(env);
+            return EvaluateMultiple(args, subenv, dynEnv, mode | Mode.AllowDefine);
         }
     }
 

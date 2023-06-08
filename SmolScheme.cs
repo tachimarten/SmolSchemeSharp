@@ -20,7 +20,7 @@ namespace SmolScheme {
             mSeparators = "[](){}".ToCharArray();
 
             mInterpreter = new Interpreter(new Libraries());
-            mEnv = mInterpreter.Libraries.CreateInteractionEnvironment();
+            mEnv = mInterpreter.Libraries.CreateNullEnvironment();
         }
 
         public char[] Separators {
@@ -56,6 +56,8 @@ namespace SmolScheme {
                 return;
             }
 
+            mEnv = mInterpreter.Libraries.CreateInteractionEnvironment();
+
             ReadLine.AutoCompletionHandler = this;
 
             while (true) {
@@ -75,7 +77,7 @@ namespace SmolScheme {
                         try {
                             SExpr expr = reader.ParseSExpr();
                             SchemeObject[] datums = mInterpreter.EvaluateMulti(
-                                expr, mEnv, dynEnv, true);
+                                expr, mEnv, dynEnv, Mode.Repl);
                             foreach (SchemeObject datum in datums)
                                 Console.WriteLine(datum);
                         } finally {

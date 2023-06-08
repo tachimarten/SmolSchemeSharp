@@ -350,16 +350,17 @@ namespace SmolScheme {
         [SchemeBridge.Accessor("ErrorObjectMessage")]
         public readonly string Message;
         public readonly SchemeObject[] Irritants;
-        public List<SourceLocation> SchemeStackTrace { get; private set; }
+
+        public List<SchemeStackFrame> SchemeStackTrace { get; private set; }
 
         public Error(string message, SchemeObject[] irritants, SourceLocation loc = null) :
                 base() {
             Message = message;
             Irritants = irritants == null ? new SchemeObject[] { } : irritants;
 
-            SchemeStackTrace = new List<SourceLocation>();
+            SchemeStackTrace = new List<SchemeStackFrame>() { new SchemeStackFrame() };
             if (loc != null)
-                SchemeStackTrace.Add(loc);
+                AttachLocation(loc);
         }
 
         public Error(string message) : this(message, new SchemeObject[] { }, null) { }
@@ -370,8 +371,8 @@ namespace SmolScheme {
 
             if (SchemeStackTrace.Count > 0) {
                 builder.AppendFormat("\nScheme stack trace:");
-                foreach (SourceLocation loc in SchemeStackTrace)
-                    builder.AppendFormat("\n  at {0}", loc);
+                foreach (SchemeStackFrame frame in SchemeStackTrace)
+                    builder.AppendFormat("\n   {0}", frame);
             }
 
             return "" + builder;
@@ -381,8 +382,14 @@ namespace SmolScheme {
             return this == other;
         }
 
-        public void AddSchemeFrame(SourceLocation loc) {
-            SchemeStackTrace.Add(loc);
+        public void AttachLocation(SourceLocation loc) {
+            SchemeStackTrace.Last().AttachLocation(loc);
+        }
+
+        public void PushStackFrame(string name) {
+            if (name != null)
+                SchemeStackTrace.Last().ProcName = name;
+            SchemeStackTrace.Add(new SchemeStackFrame());
         }
 
         [SchemeBridge("Error")]
@@ -399,6 +406,25 @@ namespace SmolScheme {
             if (MarkVisited(visited, cycles)) {
                 foreach (SchemeObject irritant in Irritants)
                     irritant.FindCycles(visited, cycles);
+            }
+        }
+
+        public class SchemeStackFrame {
+            public string ProcName;
+            public SourceLocation Loc;
+
+            public SchemeStackFrame() {
+                ProcName = null;
+                Loc = null;
+            }
+
+            public void AttachLocation(SourceLocation loc) {
+                if (Loc == null)
+                    Loc = loc;
+            }
+
+            public override string ToString() {
+                return String.Format("at {0} in {1}", ProcName, Loc);
             }
         }
     }
@@ -783,7 +809,7 @@ namespace SmolScheme {
                 return Result.ToString(options);
             }
 
-            public virtual void FindCycles(SchemeObjectPtrSet visited, SchemeObjectPtrSet cycles) {
+            public override void FindCycles(SchemeObjectPtrSet visited, SchemeObjectPtrSet cycles) {
                 Result.FindCycles(visited, cycles);
             }
         }
@@ -866,32 +892,6 @@ namespace SmolScheme {
                 return true;
             }
             return base.TryBridgeTo(type, out outResult);
-        }
-    }
-
-    // Bridging utilities
-
-    public abstract class SchemeBridgeAttribute : Attribute {
-        public string Name;
-
-        public SchemeBridgeAttribute(string name) {
-            Name = name;
-        }
-    }
-
-    public class SchemeBridge : SchemeBridgeAttribute {
-        public SchemeBridge(string name = null) : base(name) { }
-
-        public class TypeTest : SchemeBridgeAttribute {
-            public TypeTest(string name = null) : base(name) { }
-        }
-
-        public class Accessor : SchemeBridgeAttribute {
-            public Accessor(string name = null) : base(name) { }
-        }
-
-        public class Mutator : SchemeBridgeAttribute {
-            public Mutator(string name = null) : base(name) { }
         }
     }
 

@@ -14,13 +14,37 @@ using System.Text;
 namespace SmolScheme {
     // Base class for all lexers.
     internal abstract class Lexer : IDisposable {
-        private TextReader mReader;
-        private int[] mLookahead;
-
-        private string mPath;
-        private int mLineNumber;
+        private SourceStream mStream;
 
         protected bool mFoldCase;
+
+        internal Lexer(SourceStream stream, bool foldCase = false) {
+            mStream = stream;
+            mFoldCase = foldCase;
+        }
+
+        public Lexer(TextReader reader, string path = null, bool foldCase = false) :
+            this(new SourceStream(reader, path), foldCase) { }
+
+        protected int NextChar() {
+            return mStream.NextChar();
+        }
+
+        protected int PeekChar(int n = 0) {
+            return mStream.PeekChar(n);
+        }
+
+        protected void ReadLine() {
+            mStream.ReadLine();
+        }
+
+        public void Dispose() {
+            mStream.Dispose();
+        }
+
+        protected SourceLocation CurrentLoc {
+            get { return mStream.CurrentLoc; }
+        }
 
         protected abstract bool CharsAreQuoted { get; }
 
@@ -35,57 +59,6 @@ namespace SmolScheme {
         protected abstract Token ParseHashToken();
 
         protected abstract NumberToken ParseZeroPrefixedNumber();
-
-        public Lexer(TextReader reader, string path = null) {
-            // If the path wasn't supplied, see if we can get it from the reader.
-            if (path == null && reader is StreamReader) {
-                Stream stream = ((StreamReader)reader).BaseStream;
-                if (stream is FileStream)
-                    path = ((FileStream)stream).Name;
-            }
-
-            mReader = reader;
-            mPath = path;
-            mLineNumber = 1;
-
-            mFoldCase = false;
-
-            mLookahead = new int[2];
-            mLookahead[0] = mReader.Read();
-            mLookahead[1] = mReader.Read();
-        }
-
-        protected int NextChar() {
-            int ch = mLookahead[0];
-            mLookahead[0] = mLookahead[1];
-            mLookahead[1] = mReader.Read();
-            return ch;
-        }
-
-        protected int PeekChar(int n = 0) {
-            return mLookahead[n];
-        }
-
-        private void ReadLine() {
-            int ch;
-            do {
-                ch = NextChar();
-            } while (ch >= 0 && ch != (int)'\n');
-        }
-
-        private bool ConsumeWhitespace() {
-            char ch = (char)PeekChar();
-            if (ch == '\t' || ch == ' ' || ch == '\r') {
-                NextChar();
-                return true;
-            }
-            if (ch == '\n') {
-                NextChar();
-                mLineNumber++;
-                return true;
-            }
-            return false;
-        }
 
         private StringToken ParseString() {
             char ch = (char)PeekChar();
@@ -160,9 +133,10 @@ namespace SmolScheme {
 
             string token = "" + builder;
 
-            if (radix != 10) {
-                if (isFloatingPoint)
-                    SyntaxError("Floating point numbers must be specified in decimal");
+            if (radix != 10 && isFloatingPoint)
+                SyntaxError("Floating point numbers must be specified in decimal");
+
+            if (!isFloatingPoint) {
                 return new IntToken(SchemeInt.ParseBigInt(token, radix),
                     exact == null || (bool)exact, CurrentLoc);
             }
@@ -199,29 +173,18 @@ namespace SmolScheme {
             return new IdentifierToken("" + token, mFoldCase, CurrentLoc);
         }
 
-        public void Dispose() {
-            mReader.Dispose();
-        }
-
-        protected SourceLocation CurrentLoc {
-            get {
-                return new SourceLocation(mPath, mLineNumber);
-            }
-        }
-
         public Token Next() {
             Token token;
 
             char ch;
             while ((ch = (char)PeekChar()) != 0xffff) {
                 // Whitespace
-                if (ConsumeWhitespace())
+                if (mStream.ConsumeWhitespace())
                     continue;
 
                 // Comments
                 if (ch == LineCommentChar) {
                     ReadLine();
-                    mLineNumber++;
                     continue;
                 }
 
@@ -315,7 +278,10 @@ namespace SmolScheme {
 
     // S-expression lexer
     internal sealed class SLexer : Lexer, IDisposable {
-        public SLexer(TextReader reader, string path = null) : base(reader, path) { }
+        public SLexer(SourceStream stream, bool foldCase = false) : base(stream, foldCase) { }
+
+        public SLexer(TextReader reader, string path = null, bool foldCase = false) :
+                base(reader, path, foldCase) { }
 
         protected override char LineCommentChar {
             get { return ';'; }
@@ -627,6 +593,8 @@ namespace SmolScheme {
 
     // MJS-expression lexer
     internal sealed class MJSLexer : Lexer, IDisposable {
+        public MJSLexer(SourceStream stream) : base(stream) { }
+
         public MJSLexer(TextReader reader, string path = null) : base(reader, path) { }
 
         protected override bool CharsAreQuoted {
@@ -697,7 +665,7 @@ namespace SmolScheme {
             StringBuilder token = new StringBuilder();
             while ((ch = (char)PeekChar()) != -1 && IsIdentifierChar(ch))
                 token.Append((char)NextChar());
-            return new IdentifierToken("" + token, mFoldCase, CurrentLoc);
+            return new IdentifierToken("" + token, /*foldCase=*/false, CurrentLoc);
         }
 
         public static bool IsFirstIdentifierChar(char ch) {
@@ -735,6 +703,157 @@ namespace SmolScheme {
         }
     }
 
+    /// <summary>
+    /// The wrapper lexer for `.scm` files, responsible for parsing and determining which mode
+    /// we're in.
+    /// </summary>
+    internal class InitialFileLexer : IDisposable {
+        private SourceStream mStream;
+        private bool mUseMJSExprs;
+
+        public InitialFileLexer(SourceStream stream, bool preferMJSExprs = false) {
+            mStream = stream;
+            mUseMJSExprs = preferMJSExprs;
+        }
+
+        public InitialFileLexer(
+                TextReader reader, string path = null, bool preferMJSExprs = false) :
+                this(new SourceStream(reader, path)) {
+            mUseMJSExprs = preferMJSExprs;
+        }
+
+        public Reader CreateReader() {
+            bool shebangAllowed = true, foldCase = false;
+
+            char ch;
+            while ((ch = (char)mStream.PeekChar()) != 0xffff) {
+                if (" \r\t".Contains(ch)) {
+                    mStream.NextChar();
+                    continue;
+                }
+                if (ch == '\n') {
+                    shebangAllowed = false;
+                    mStream.NextChar();
+                    continue;
+                }
+
+                if ((char)mStream.PeekChar(0) != '#' || (char)mStream.PeekChar(1) != '!')
+                    break;
+
+                mStream.NextChar();
+                mStream.NextChar();
+
+                ch = (char)mStream.PeekChar();
+                if (Char.IsLetter(ch)) {
+                    StringBuilder builder = new StringBuilder();
+                    while (Char.IsLetter((ch = (char)mStream.PeekChar())) || ch == '-')
+                        builder.Append((char)mStream.NextChar());
+
+                    string token = "" + builder;
+                    switch (token) {
+                        case "fold-case":
+                            foldCase = true;
+                            break;
+                        case "no-fold-case":
+                            foldCase = false;
+                            break;
+                        case "mjs":
+                            mUseMJSExprs = true;
+                            break;
+                        case "no-mjs":
+                            mUseMJSExprs = false;
+                            break;
+                        default:
+                            throw new ParseException(String.Format("Expected `fold-case`, " +
+                                "`no-fold-case`, `mjs`, or `no-mjs` but found `{0}`", token),
+                                mStream.CurrentLoc);
+                    }
+
+                    shebangAllowed = false;
+                    continue;
+                }
+
+                // Handle shebang lines.
+                if (shebangAllowed) {
+                    mStream.ReadLine();
+                    shebangAllowed = false;
+                }
+            }
+
+            return mUseMJSExprs ? new MJSReader(mStream) : new SReader(mStream, foldCase);
+        }
+
+        public void Dispose() {
+            mStream.Dispose();
+        }
+    }
+
+    // Lookahead stream
+
+    internal class SourceStream : IDisposable {
+        private TextReader mReader;
+        private int[] mLookahead;
+
+        private string mPath;
+        private int mLineNumber;
+
+        public SourceStream(TextReader reader, string path = null) {
+            // If the path wasn't supplied, see if we can get it from the reader.
+            if (path == null && reader is StreamReader) {
+                Stream stream = ((StreamReader)reader).BaseStream;
+                if (stream is FileStream)
+                    path = ((FileStream)stream).Name;
+            }
+
+            mReader = reader;
+            mPath = path;
+            mLineNumber = 1;
+
+            mLookahead = new int[2];
+            mLookahead[0] = mReader.Read();
+            mLookahead[1] = mReader.Read();
+        }
+
+        public int NextChar() {
+            int ch = mLookahead[0];
+            mLookahead[0] = mLookahead[1];
+            mLookahead[1] = mReader.Read();
+
+            if (ch == '\n')
+                mLineNumber++;
+
+            return ch;
+        }
+
+        public int PeekChar(int n = 0) {
+            return mLookahead[n];
+        }
+
+        public void ReadLine() {
+            int ch;
+            do {
+                ch = NextChar();
+            } while (ch >= 0 && ch != (int)'\n');
+        }
+
+        public SourceLocation CurrentLoc {
+            get { return new SourceLocation(mPath, mLineNumber); }
+        }
+
+        public void Dispose() {
+            mReader.Dispose();
+        }
+
+        public bool ConsumeWhitespace() {
+            char ch = (char)PeekChar();
+            if (" \r\t\n".Contains(ch)) {
+                NextChar();
+                return true;
+            }
+            return false;
+        }
+    }
+
     // Tokens
 
     internal abstract class Token {
@@ -753,7 +872,7 @@ namespace SmolScheme {
         }
 
         public override string ToString() {
-            return Punctuation;
+            return String.Format("`{0}`", Punctuation);
         }
     }
 
@@ -765,6 +884,10 @@ namespace SmolScheme {
             Symbol = symbol;
             CaseFolding = caseFolding;
         }
+
+        public override string ToString() {
+            return String.Format("`{0}`", Symbol);
+        }
     }
 
     internal class CharToken : Token {
@@ -773,6 +896,10 @@ namespace SmolScheme {
         public CharToken(char value, SourceLocation loc) : base(loc) {
             Value = value;
         }
+
+        public override string ToString() {
+            return String.Format("`{0}`", SchemeString.Escape("" + Value, '\''));
+        }
     }
 
     internal class StringToken : Token {
@@ -780,6 +907,10 @@ namespace SmolScheme {
 
         public StringToken(string value, SourceLocation loc) : base(loc) {
             Value = value;
+        }
+
+        public override string ToString() {
+            return String.Format("`{0}`", SchemeString.Escape(Value, '"'));
         }
     }
 
@@ -797,6 +928,10 @@ namespace SmolScheme {
         public IntToken(BigInteger value, bool exact, SourceLocation loc) : base(exact, loc) {
             Value = value;
         }
+
+        public override string ToString() {
+            return String.Format("the integer {0}", Value);
+        }
     }
 
     internal sealed class DoubleToken : NumberToken {
@@ -805,6 +940,10 @@ namespace SmolScheme {
         public DoubleToken(double value, bool exact, SourceLocation loc) : base(exact, loc) {
             Value = value;
         }
+
+        public override string ToString() {
+            return String.Format("the floating-point number {0}", Value);
+        }
     }
 
     internal sealed class BoolToken : Token {
@@ -812,6 +951,10 @@ namespace SmolScheme {
 
         public BoolToken(bool value, SourceLocation loc) : base(loc) {
             Value = value;
+        }
+
+        public override string ToString() {
+            return Value ? "the true value" : "the false value";
         }
     }
 
